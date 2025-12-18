@@ -3,7 +3,7 @@ const app = express();
 
 const PORT = process.env.PORT || 3000;
 app.use(express.json());
-
+app.use(cors())
 // In-memory feeder store
 const feeders = {};
 
@@ -108,3 +108,4 @@ app.get("/", (req, res) => {
 app.listen(PORT, () => {
   console.log("Backend running on port", PORT);
 });
+
