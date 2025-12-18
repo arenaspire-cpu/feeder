@@ -61,6 +61,25 @@ app.get("/api/feeders", (req, res) => {
   res.json(list);
 });
 
+app.get("/command-http", (req, res) => {
+  const { device_id, token } = req.query;
+
+  if (!device_id || !token) {
+    return res.status(400).json({ command: "NONE" });
+  }
+
+  const feeder = feeders[device_id];
+  if (!feeder || feeder.token !== token) {
+    return res.json({ command: "NONE" });
+  }
+
+  const cmd = feeder.command || "NONE";
+  feeder.command = "NONE";
+
+  res.json({ command: cmd });
+});
+
+
 // ================= ESP =================
 app.get("/command", (req, res) => {
   const { device_id, token } = req.query;
@@ -109,5 +128,6 @@ app.get("/", (req, res) => {
 app.listen(PORT, () => {
   console.log("Backend running on port", PORT);
 });
+
 
 
