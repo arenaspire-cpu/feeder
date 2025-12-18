@@ -1,133 +1,85 @@
 const express = require("express");
-const app = express();
 const cors = require("cors");
 
-const PORT = process.env.PORT || 3000;
+const app = express();
+app.use(cors());
 app.use(express.json());
-app.use(cors())
-// In-memory feeder store
-const feeders = {};
 
 /*
-feeders[device_id] = {
-  token,
-  online,
-  lastSeen,
-  lastFeed,
-  queued
-}
+  IN-MEMORY FEEDER STORE
+  (OK for MVP – later replace with DB)
 */
-
-// ================= APP / FLUTTERFLOW =================
-app.post("/api/feed", (req, res) => {
-  const device_id = req.body?.device_id;
-
-  if (!device_id) {
-    return res.status(400).json({
-      ok: false,
-      error: "device_id required"
-    });
+const feeders = {
+  FEEDER_001: {
+    token: "SECRET123",
+    command: "NONE",
+    lastSeen: Date.now()
   }
+};
 
-  // Auto-create feeder if not exists
-  if (!feeders[device_id]) {
-    feeders[device_id] = {
-      token: "SECRET123",
-      online: false,
-      lastSeen: null,
-      lastFeed: null,
-      queued: false
-    };
-  }
-
-  feeders[device_id].queued = true;
-
-  res.json({
-    ok: true,
-    status: "queued",
-    device_id
-  });
+/*
+  HEALTH CHECK
+*/
+app.get("/", (req, res) => {
+  res.send("Feeder backend running");
 });
 
-// List feeders (for FlutterFlow UI)
+/*
+  GET FEEDERS (for app / web UI)
+*/
 app.get("/api/feeders", (req, res) => {
-  const list = Object.entries(feeders).map(([id, f]) => ({
+  const list = Object.keys(feeders).map(id => ({
     device_id: id,
-    online: f.online,
-    lastSeen: f.lastSeen,
-    lastFeed: f.lastFeed
+    online: Date.now() - feeders[id].lastSeen < 15000,
+    lastSeen: feeders[id].lastSeen
   }));
 
   res.json(list);
 });
 
+/*
+  FEED REQUEST (from app / web)
+*/
+app.post("/api/feed", (req, res) => {
+  const { device_id } = req.body;
+
+  if (!device_id || !feeders[device_id]) {
+    return res.status(400).json({ ok: false, error: "Invalid feeder" });
+  }
+
+  feeders[device_id].command = "FEED";     // 🔑 STORE COMMAND
+  feeders[device_id].lastSeen = Date.now();
+
+  console.log("FEED queued for", device_id);
+
+  res.json({ ok: true });
+});
+
+/*
+  ESP POLLING ENDPOINT
+*/
 app.get("/command-http", (req, res) => {
   const { device_id, token } = req.query;
-
-  if (!device_id || !token) {
-    return res.status(400).json({ command: "NONE" });
-  }
 
   const feeder = feeders[device_id];
   if (!feeder || feeder.token !== token) {
     return res.json({ command: "NONE" });
   }
 
-  const cmd = feeder.command || "NONE";
-  feeder.command = "NONE";
+  feeder.lastSeen = Date.now();
+
+  const cmd = feeder.command;
+  feeder.command = "NONE";                 // 🔑 RESET AFTER READ
+
+  console.log("Command sent to", device_id, ":", cmd);
 
   res.json({ command: cmd });
 });
 
-
-// ================= ESP =================
-app.get("/command", (req, res) => {
-  const { device_id, token } = req.query;
-
-  if (!device_id || !token) {
-    return res.json({ command: "NONE" });
-  }
-
-  // Auto-create feeder on first ESP contact
-  if (!feeders[device_id]) {
-    feeders[device_id] = {
-      token,
-      online: true,
-      lastSeen: Date.now(),
-      lastFeed: null,
-      queued: false
-    };
-  }
-
-  const feeder = feeders[device_id];
-
-  // Token validation
-  if (feeder.token !== token) {
-    return res.json({ command: "NONE" });
-  }
-
-  // Update status
-  feeder.online = true;
-  feeder.lastSeen = Date.now();
-
-  // Handle feed
-  if (feeder.queued) {
-    feeder.queued = false;
-    feeder.lastFeed = Date.now();
-    return res.json({ command: "FEED" });
-  }
-
-  res.json({ command: "NONE" });
-});
-
-// ================= ROOT =================
-app.get("/", (req, res) => {
-  res.send("Feeder backend running");
-});
-
+/*
+  START SERVER
+*/
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log("Backend running on port", PORT);
+  console.log("Server running on port", PORT);
 });
-
-
-
