@@ -6,14 +6,19 @@ app.use(cors());
 app.use(express.json());
 
 /*
+  CONFIG
+*/
+const FEED_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
+
+/*
   IN-MEMORY FEEDER STORE
-  (OK for MVP – later replace with DB)
 */
 const feeders = {
   FEEDER_001: {
     token: "SECRET123",
     command: "NONE",
-    lastSeen: Date.now()
+    lastSeen: Date.now(),
+    lastFeed: 0
   }
 };
 
@@ -25,32 +30,47 @@ app.get("/", (req, res) => {
 });
 
 /*
-  GET FEEDERS (for app / web UI)
+  GET FEEDERS (UI)
 */
 app.get("/api/feeders", (req, res) => {
   const list = Object.keys(feeders).map(id => ({
     device_id: id,
-    online: Date.now() - feeders[id].lastSeen < 15000,
-    lastSeen: feeders[id].lastSeen
+    online: Date.now() - feeders[id].lastSeen < 20000,
+    lastSeen: feeders[id].lastSeen,
+    lastFeed: feeders[id].lastFeed
   }));
 
   res.json(list);
 });
 
 /*
-  FEED REQUEST (from app / web)
+  FEED REQUEST (UI / BUTTON)
 */
 app.post("/api/feed", (req, res) => {
   const { device_id } = req.body;
+  const feeder = feeders[device_id];
 
-  if (!device_id || !feeders[device_id]) {
+  if (!device_id || !feeder) {
     return res.status(400).json({ ok: false, error: "Invalid feeder" });
   }
 
-  feeders[device_id].command = "FEED";     // 🔑 STORE COMMAND
-  feeders[device_id].lastSeen = Date.now();
+  const now = Date.now();
 
-  console.log("FEED queued for", device_id);
+  if (now - feeder.lastFeed < FEED_COOLDOWN_MS) {
+    return res.status(429).json({
+      ok: false,
+      error: "Cooldown active"
+    });
+  }
+
+  feeder.command = "FEED";
+  feeder.lastFeed = now;
+
+  console.log(
+    new Date().toISOString(),
+    "FEED queued for",
+    device_id
+  );
 
   res.json({ ok: true });
 });
@@ -60,8 +80,8 @@ app.post("/api/feed", (req, res) => {
 */
 app.get("/command-http", (req, res) => {
   const { device_id, token } = req.query;
-
   const feeder = feeders[device_id];
+
   if (!feeder || feeder.token !== token) {
     return res.json({ command: "NONE" });
   }
@@ -69,9 +89,14 @@ app.get("/command-http", (req, res) => {
   feeder.lastSeen = Date.now();
 
   const cmd = feeder.command;
-  feeder.command = "NONE";                 // 🔑 RESET AFTER READ
+  feeder.command = "NONE"; // reset after read
 
-  console.log("Command sent to", device_id, ":", cmd);
+  console.log(
+    new Date().toISOString(),
+    "Command delivered to",
+    device_id,
+    cmd
+  );
 
   res.json({ command: cmd });
 });
