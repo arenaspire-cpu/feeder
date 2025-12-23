@@ -1,50 +1,68 @@
 const express = require("express");
 const cors = require("cors");
+const fs = require("fs");
+const path = require("path");
 
 const app = express();
 app.use(cors());
-app.use(express.raw({ type: "image/jpeg", limit: "5mb" }));
 
-const feeders = {
+const FEEDERS = {
   FEEDER_001: {
     token: "SECRET123",
     command: "NONE",
-    image: null,
     lastFeed: 0
   }
 };
 
-/* FEED BUTTON */
-app.post("/api/feed", (req, res) => {
-  feeders.FEEDER_001.command = "FEED";
+app.get("/", (req, res) => {
+  res.send("Feeder backend running");
+});
+
+/******** FEED ********/
+app.post("/api/feed", express.json(), (req, res) => {
+  const { device_id } = req.body;
+  const feeder = FEEDERS[device_id];
+  if (!feeder) return res.status(400).end();
+
+  feeder.command = "FEED";
+  feeder.lastFeed = Date.now();
   res.json({ ok: true });
 });
 
-/* ESP POLL */
+/******** COMMAND POLL ********/
 app.get("/command-http", (req, res) => {
-  const f = feeders[req.query.device_id];
-  if (!f || f.token !== req.query.token) {
+  const { device_id, token } = req.query;
+  const feeder = FEEDERS[device_id];
+
+  if (!feeder || feeder.token !== token) {
     return res.json({ command: "NONE" });
   }
-  const cmd = f.command;
-  f.command = "NONE";
+
+  const cmd = feeder.command;
+  feeder.command = "NONE";
   res.json({ command: cmd });
 });
 
-/* IMAGE UPLOAD */
-app.post("/upload/:id", (req, res) => {
-  feeders[req.params.id].image = req.body;
-  res.send("OK");
+/******** IMAGE UPLOAD ********/
+app.post("/api/upload", express.raw({ limit: "5mb", type: "image/jpeg" }), (req, res) => {
+  const id = req.header("X-Device-ID");
+  const token = req.header("X-Token");
+
+  const feeder = FEEDERS[id];
+  if (!feeder || feeder.token !== token) {
+    return res.status(403).end();
+  }
+
+  fs.writeFileSync(`latest_${id}.jpg`, req.body);
+  res.sendStatus(200);
 });
 
-/* IMAGE VIEW */
-app.get("/snapshot/:id", (req, res) => {
-  const img = feeders[req.params.id].image;
-  if (!img) return res.status(404).end();
-  res.set("Content-Type", "image/jpeg");
-  res.send(img);
+/******** IMAGE SERVE ********/
+app.get("/api/image/:id", (req, res) => {
+  const file = `latest_${req.params.id}.jpg`;
+  if (!fs.existsSync(file)) return res.status(404).end();
+  res.sendFile(path.resolve(file));
 });
 
-app.listen(3000, () =>
-  console.log("Backend running")
-);
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log("Server on", PORT));
