@@ -1,56 +1,82 @@
 const express = require("express");
 const cors = require("cors");
 const fs = require("fs");
+const path = require("path");
 
 const app = express();
 app.use(cors());
-app.use(express.raw({ limit: "2mb", type: "*/*" }));
 
+// IMPORTANT: RAW body for images
+app.use("/upload-frame", express.raw({
+  type: "application/octet-stream",
+  limit: "5mb"
+}));
+
+/* ===== CONFIG ===== */
+const FEED_COOLDOWN_MS = 0;
+
+/* ===== FEEDERS ===== */
 const feeders = {
   FEEDER_001: {
     token: "SECRET123",
     command: "NONE",
-    image: null,
+    lastFeed: 0,
     lastSeen: Date.now()
   }
 };
 
-app.post("/api/upload", (req, res) => {
-  const id = req.headers["x-device-id"];
-  const token = req.headers["x-token"];
-  const feeder = feeders[id];
+/* ===== FEED COMMAND ===== */
+app.get("/command-http", (req, res) => {
+  const { device_id, token } = req.query;
+  const feeder = feeders[device_id];
 
   if (!feeder || feeder.token !== token) {
-    return res.sendStatus(401);
+    return res.json({ command: "NONE" });
   }
 
-  feeder.image = Buffer.from(req.body).toString("base64");
   feeder.lastSeen = Date.now();
+  const cmd = feeder.command;
+  feeder.command = "NONE";
+
+  res.json({ command: cmd });
+});
+
+/* ===== FEED REQUEST ===== */
+app.post("/api/feed", express.json(), (req, res) => {
+  const { device_id } = req.body;
+  const feeder = feeders[device_id];
+  if (!feeder) return res.sendStatus(400);
+
+  feeder.command = "FEED";
+  feeder.lastFeed = Date.now();
+  res.json({ ok: true });
+});
+
+/* ===== RECEIVE FRAME ===== */
+app.post("/upload-frame", (req, res) => {
+  const device = req.query.device_id;
+  if (!device) return res.sendStatus(400);
+
+  const dir = path.join(__dirname, "clips", device);
+  fs.mkdirSync(dir, { recursive: true });
+
+  const file = path.join(dir, `${Date.now()}.jpg`);
+  fs.writeFileSync(file, req.body);
 
   res.sendStatus(200);
 });
 
-app.get("/api/image/:id", (req, res) => {
-  const feeder = feeders[req.params.id];
-  if (!feeder || !feeder.image) return res.sendStatus(404);
+/* ===== LIST CLIPS ===== */
+app.get("/clips/:device", (req, res) => {
+  const dir = path.join(__dirname, "clips", req.params.device);
+  if (!fs.existsSync(dir)) return res.json([]);
 
-  res.set("Content-Type", "image/jpeg");
-  res.send(Buffer.from(feeder.image, "base64"));
+  const files = fs.readdirSync(dir).slice(-30);
+  res.json(files);
 });
 
-app.post("/api/feed", (req, res) => {
-  feeders.FEEDER_001.command = "FEED";
-  res.json({ ok: true });
-});
+app.use("/media", express.static("clips"));
 
-app.get("/command-http", (req, res) => {
-  const feeder = feeders[req.query.device_id];
-  if (!feeder || feeder.token !== req.query.token) {
-    return res.json({ command: "NONE" });
-  }
-  const cmd = feeder.command;
-  feeder.command = "NONE";
-  res.json({ command: cmd });
-});
-
-app.listen(3000, () => console.log("Backend running"));
+app.listen(3000, () =>
+  console.log("Backend running on 3000")
+);
