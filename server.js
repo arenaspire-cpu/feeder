@@ -8,7 +8,7 @@ app.use(express.json());
 /*
   CONFIG
 */
-const FEED_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
+const FEED_COOLDOWN_MS = 0; // 5 minutes
 
 /*
   IN-MEMORY FEEDER STORE
@@ -108,3 +108,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("Server running on port", PORT);
 });
+
