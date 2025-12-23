@@ -1,7 +1,7 @@
 const express = require("express");
 const cors = require("cors");
-const app = express();
 
+const app = express();
 app.use(cors());
 app.use(express.raw({ type: "image/jpeg", limit: "5mb" }));
 
@@ -14,36 +14,37 @@ const feeders = {
   }
 };
 
-app.get("/", (_, res) => res.send("Backend OK"));
-
-app.post("/api/upload", (req, res) => {
-  const { device_id, token } = req.query;
-  const f = feeders[device_id];
-  if (!f || f.token !== token) return res.sendStatus(403);
-
-  f.image = Buffer.from(req.body).toString("base64");
-  res.send("OK");
-});
-
-app.get("/api/image/:id", (req, res) => {
-  const f = feeders[req.params.id];
-  if (!f || !f.image) return res.sendStatus(404);
-  res.type("jpg").send(Buffer.from(f.image, "base64"));
-});
-
-app.post("/api/feed", express.json(), (req, res) => {
-  const f = feeders[req.body.device_id];
-  if (!f) return res.sendStatus(400);
-  f.command = "FEED";
+/* FEED BUTTON */
+app.post("/api/feed", (req, res) => {
+  feeders.FEEDER_001.command = "FEED";
   res.json({ ok: true });
 });
 
+/* ESP POLL */
 app.get("/command-http", (req, res) => {
   const f = feeders[req.query.device_id];
-  if (!f || f.token !== req.query.token) return res.json({ command: "NONE" });
+  if (!f || f.token !== req.query.token) {
+    return res.json({ command: "NONE" });
+  }
   const cmd = f.command;
   f.command = "NONE";
   res.json({ command: cmd });
 });
 
-app.listen(3000, () => console.log("Server running"));
+/* IMAGE UPLOAD */
+app.post("/upload/:id", (req, res) => {
+  feeders[req.params.id].image = req.body;
+  res.send("OK");
+});
+
+/* IMAGE VIEW */
+app.get("/snapshot/:id", (req, res) => {
+  const img = feeders[req.params.id].image;
+  if (!img) return res.status(404).end();
+  res.set("Content-Type", "image/jpeg");
+  res.send(img);
+});
+
+app.listen(3000, () =>
+  console.log("Backend running")
+);
