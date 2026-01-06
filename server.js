@@ -1,30 +1,35 @@
 const express = require('express');
+const { WebSocketServer } = require('ws');
 const http = require('http');
-const { Server } = require('socket.io');
 const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server);
+const wss = new WebSocketServer({ server });
 
-app.use(express.static('public'));
+// Serve the frontend files
+app.use(express.static(path.join(__dirname, 'public')));
 
-io.on('connection', (socket) => {
-    console.log('A user or ESP32 connected:', socket.id);
+wss.on('connection', (ws) => {
+    console.log('Device connected (ESP32 or Browser)');
 
-    // When the "Feed" button is pressed on the website
-    socket.on('feed_request', () => {
-        console.log('Feed command received! Sending to ESP32...');
-        // Broadcast to everyone (including the ESP32)
-        io.emit('rotate_servo', { angle: 90 }); 
+    ws.on('message', (data) => {
+        const message = data.toString();
+        console.log('Received:', message);
+
+        // If the message is 'FEED' (from browser), tell ESP32 to 'ROTATE'
+        if (message === 'FEED') {
+            console.log('Broadcasting ROTATE command...');
+            wss.clients.forEach((client) => {
+                if (client.readyState === 1) {
+                    client.send('ROTATE');
+                }
+            });
+        }
     });
 
-    socket.on('disconnect', () => {
-        console.log('User disconnected');
-    });
+    ws.on('close', () => console.log('Client disconnected'));
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-});
+server.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
