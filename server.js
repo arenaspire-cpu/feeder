@@ -1,247 +1,147 @@
 const express = require("express");
 const cors = require("cors");
-
 const app = express();
+
 app.use(cors());
+app.use(express.json());
 
-// JSON for normal API
-app.use(express.json({ limit: "1mb" }));
-
-/*
-  CONFIG
-*/
-const FEED_COOLDOWN_MS = 0; // set to 5*60*1000 later
+// IN-MEMORY STORAGE (Auto-populates when a new feeder connects)
+let feeders = {};
 
 /*
-  IN-MEMORY STORE
+  1. AUTO-REGISTRATION & COMMAND POLLING
+  The ESP32 calls this every 1-2 seconds.
 */
-const feeders = {
-  FEEDER_001: {
-    token: "SECRET123",
-    command: "NONE",
-    lastSeen: Date.now(),
-    lastFeed: 0,
-    latestJpeg: null,     // Buffer
-    latestJpegAt: 0,
-    clipFrames: []        // [{buf, at}]
-  }
-};
+app.get("/api/poll", (req, res) => {
+    const { device_id, token } = req.query;
 
-/*
-  HEALTH
-*/
-app.get("/", (req, res) => res.send("Feeder backend running"));
+    // AUTO-ADD: If feeder doesn't exist, create it automatically
+    if (!feeders[device_id]) {
+        console.log(`New Feeder Registered: ${device_id}`);
+        feeders[device_id] = {
+            token: token || "default_pass",
+            command: "NONE",
+            lastSeen: Date.now(),
+            latestFrame: null
+        };
+    }
 
-/*
-  LIST FEEDERS
-*/
-app.get("/api/feeders", (req, res) => {
-  const list = Object.keys(feeders).map(id => ({
-    device_id: id,
-    online: Date.now() - feeders[id].lastSeen < 20000,
-    lastSeen: feeders[id].lastSeen,
-    lastFeed: feeders[id].lastFeed,
-    latestJpegAt: feeders[id].latestJpegAt
-  }));
-  res.json(list);
+    const feeder = feeders[device_id];
+    feeder.lastSeen = Date.now();
+
+    // Send pending command and reset
+    const cmd = feeder.command;
+    feeder.command = "NONE";
+    res.json({ command: cmd });
 });
 
 /*
-  FEED REQUEST (UI BUTTON)
+  2. IMAGE UPLOAD (The "Push" for the stream)
+  The ESP32 posts its camera frames here as fast as it can.
+*/
+app.post("/api/upload", express.raw({ type: "image/jpeg", limit: "2mb" }), (req, res) => {
+    const { device_id } = req.query;
+    if (feeders[device_id]) {
+        feeders[device_id].latestFrame = req.body;
+        feeders[device_id].lastSeen = Date.now();
+        return res.sendStatus(200);
+    }
+    res.sendStatus(404);
+});
+
+/*
+  3. PROXIED MJPEG STREAM
+  This makes Render look like a real live camera to your phone.
+*/
+app.get("/api/stream", (req, res) => {
+    const { device_id } = req.query;
+    const feeder = feeders[device_id];
+
+    if (!feeder) return res.status(404).send("Feeder not found");
+
+    res.writeHead(200, {
+        'Content-Type': 'multipart/x-mixed-replace; boundary=frame',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'Pragma': 'no-cache'
+    });
+
+    // Send a new frame to the browser whenever we have one
+    const streamInterval = setInterval(() => {
+        if (feeder.latestFrame) {
+            res.write(`--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${feeder.latestFrame.length}\r\n\r\n`);
+            res.write(feeder.latestFrame);
+            res.write("\r\n");
+        }
+    }, 100); // 10 FPS approx
+
+    req.on('close', () => clearInterval(streamInterval));
+});
+
+/*
+  4. UI ACTION: FEED
 */
 app.post("/api/feed", (req, res) => {
-  const { device_id } = req.body;
-  const feeder = feeders[device_id];
-  if (!device_id || !feeder) return res.status(400).json({ ok: false, error: "Invalid feeder" });
-
-  const now = Date.now();
-  if (now - feeder.lastFeed < FEED_COOLDOWN_MS) {
-    return res.status(429).json({ ok: false, error: "Cooldown active" });
-  }
-
-  feeder.command = "FEED";
-  feeder.lastFeed = now;
-
-  console.log(new Date().toISOString(), "FEED queued for", device_id);
-  res.json({ ok: true });
+    const { device_id } = req.body;
+    if (feeders[device_id]) {
+        feeders[device_id].command = "FEED";
+        return res.json({ success: true });
+    }
+    res.status(404).json({ error: "Feeder offline" });
 });
 
 /*
-  ESP POLLING
+  5. PURRRR-STYLE UI
 */
-app.get("/command-http", (req, res) => {
-  const { device_id, token } = req.query;
-  const feeder = feeders[device_id];
+app.get("/", (req, res) => {
+    res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Purrrr Cloud</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            body { font-family: sans-serif; background: #121212; color: white; text-align: center; }
+            .feeder-card { background: #1e1e1e; margin: 20px auto; padding: 20px; max-width: 400px; border-radius: 20px; border: 1px solid #333; }
+            img { width: 100%; border-radius: 15px; background: #000; min-height: 200px; }
+            .btn { background: #ff4757; color: white; border: none; padding: 15px 30px; border-radius: 50px; font-size: 18px; cursor: pointer; margin-top: 15px; width: 100%; }
+            .status { font-size: 12px; color: #777; margin-bottom: 10px; }
+            .live-dot { color: #ff4757; animation: blink 1s infinite; }
+            @keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.3; } 100% { opacity: 1; } }
+        </style>
+    </head>
+    <body>
+        <h1>🐾 Purrrr Feeders</h1>
+        <div id="app">Loading feeders...</div>
 
-  if (!feeder || feeder.token !== token) {
-    return res.json({ command: "NONE" });
-  }
+        <script>
+            async function loadFeeders() {
+                // In a real app, you'd fetch a list. For now, we'll just check the active one.
+                const device_id = "FEEDER_001"; 
+                document.getElementById('app').innerHTML = \`
+                    <div class="feeder-card">
+                        <div class="status"><span class="live-dot">●</span> LIVE FEED</div>
+                        <img src="/api/stream?device_id=\${device_id}">
+                        <h2>\${device_id}</h2>
+                        <button class="btn" onclick="feed('\${device_id}')">Dispense Treat</button>
+                    </div>
+                \`;
+            }
 
-  feeder.lastSeen = Date.now();
-
-  const cmd = feeder.command;
-  feeder.command = "NONE";
-
-  console.log(new Date().toISOString(), "Command delivered", device_id, cmd);
-  res.json({ command: cmd });
+            async function feed(id) {
+                await fetch('/api/feed', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ device_id: id })
+                });
+                alert("Feed command sent!");
+            }
+            loadFeeders();
+        </script>
+    </body>
+    </html>
+    `);
 });
 
-/*
-  RAW JPEG UPLOAD (LATEST IMAGE)
-  IMPORTANT: this MUST use express.raw for image/jpeg
-*/
-app.post(
-  "/api/upload-jpeg",
-  express.raw({ type: "image/jpeg", limit: "5mb" }),
-  (req, res) => {
-    const { device_id, token } = req.query;
-    const feeder = feeders[device_id];
-
-    if (!feeder || feeder.token !== token) return res.status(401).send("NO");
-    if (!req.body || !Buffer.isBuffer(req.body)) return res.status(400).send("NO_BODY");
-
-    feeder.latestJpeg = req.body;
-    feeder.latestJpegAt = Date.now();
-    feeder.lastSeen = Date.now();
-
-    res.json({ ok: true });
-  }
-);
-
-/*
-  RAW JPEG UPLOAD (CLIP FRAME)
-*/
-app.post(
-  "/api/upload-frame",
-  express.raw({ type: "image/jpeg", limit: "5mb" }),
-  (req, res) => {
-    const { device_id, token, clip_id, idx } = req.query;
-    const feeder = feeders[device_id];
-
-    if (!feeder || feeder.token !== token) return res.status(401).send("NO");
-    if (!req.body || !Buffer.isBuffer(req.body)) return res.status(400).send("NO_BODY");
-
-    // Keep only last ~60 frames (beta)
-    feeder.clipFrames.push({ buf: req.body, at: Date.now(), clip_id, idx: Number(idx || 0) });
-    if (feeder.clipFrames.length > 60) feeder.clipFrames.splice(0, feeder.clipFrames.length - 60);
-
-    feeder.lastSeen = Date.now();
-    res.json({ ok: true });
-  }
-);
-
-/*
-  SERVE LATEST IMAGE
-*/
-app.get("/api/latest.jpg", (req, res) => {
-  const { device_id } = req.query;
-  const feeder = feeders[device_id];
-  if (!feeder || !feeder.latestJpeg) return res.status(404).send("No image yet");
-
-  res.setHeader("Content-Type", "image/jpeg");
-  res.setHeader("Cache-Control", "no-store");
-  res.send(feeder.latestJpeg);
-});
-
-/*
-  SERVE “CLIP” AS MJPEG-LIKE STREAM (simple)
-*/
-app.get("/api/clip.mjpg", async (req, res) => {
-  const { device_id } = req.query;
-  const feeder = feeders[device_id];
-  if (!feeder) return res.status(404).end();
-
-  res.writeHead(200, {
-    "Content-Type": "multipart/x-mixed-replace; boundary=frame",
-    "Cache-Control": "no-store",
-    "Connection": "close",
-    "Pragma": "no-cache",
-  });
-
-  // stream last N frames slowly
-  const frames = feeder.clipFrames.slice(-30);
-  for (const f of frames) {
-    res.write(`--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${f.buf.length}\r\n\r\n`);
-    res.write(f.buf);
-    res.write("\r\n");
-    await new Promise(r => setTimeout(r, 120));
-  }
-
-  res.end();
-});
-
-/*
-  SIMPLE UI
-*/
-app.get("/ui", (req, res) => {
-  res.type("html").send(`
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8"/>
-  <title>Feeder Beta UI</title>
-  <style>
-    body { font-family: Arial; padding: 16px; }
-    .row { display:flex; gap:16px; flex-wrap:wrap; }
-    .card { border:1px solid #ddd; border-radius:12px; padding:12px; }
-    img { max-width: 360px; border-radius:12px; }
-    button { padding:10px 14px; border-radius:10px; border:1px solid #333; cursor:pointer; }
-    input { padding:8px; border-radius:8px; border:1px solid #ccc; }
-  </style>
-</head>
-<body>
-  <h2>Smart Feeder Beta UI</h2>
-
-  <div class="card">
-    <label>device_id:</label>
-    <input id="device" value="FEEDER_001"/>
-    <button onclick="feed()">Feed</button>
-    <button onclick="refreshNow()">Refresh image</button>
-  </div>
-
-  <div class="row">
-    <div class="card">
-      <h3>Latest Image (auto refresh)</h3>
-      <img id="latest" src="" alt="latest"/>
-      <div id="status"></div>
-    </div>
-
-    <div class="card">
-      <h3>Last Clip (burst playback)</h3>
-      <img id="clip" src="" alt="clip"/>
-      <div style="font-size:12px; opacity:0.8;">This plays the last uploaded burst frames.</div>
-    </div>
-  </div>
-
-<script>
-function deviceId(){ return document.getElementById("device").value.trim(); }
-
-async function feed(){
-  const r = await fetch("/api/feed", {
-    method:"POST",
-    headers: {"Content-Type":"application/json"},
-    body: JSON.stringify({device_id: deviceId()})
-  });
-  const j = await r.json().catch(()=>({}));
-  document.getElementById("status").textContent = "Feed response: " + JSON.stringify(j);
-}
-
-function refreshNow(){
-  const d = deviceId();
-  document.getElementById("latest").src = "/api/latest.jpg?device_id="+encodeURIComponent(d)+"&t="+Date.now();
-  document.getElementById("clip").src   = "/api/clip.mjpg?device_id="+encodeURIComponent(d)+"&t="+Date.now();
-}
-
-setInterval(refreshNow, 1500);
-refreshNow();
-</script>
-</body>
-</html>
-  `);
-});
-
-/*
-  START
-*/
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("Server running on port", PORT));
+app.listen(PORT, () => console.log(`Purrrr Backend Active on Port ${PORT}`));
